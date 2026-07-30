@@ -2,8 +2,9 @@
 
 client_id = "9c10c85de0b4ff5919fbf413cdabad3c"
 name = "Transit Pro"
-application_url = "https://example.com"
+application_url = "https://transit-pro.onrender.com/"
 embedded = true
+handle = "transit-pro-1"
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
@@ -45,7 +46,11 @@ api_version = "2026-10"
   topics = [ "app/scopes_update" ]
 
 [auth]
-redirect_urls = [ "https://example.com/api/auth" ]
+redirect_urls = [
+  "https://transit-pro.onrender.com/auth/callback",
+  "https://transit-pro.onrender.com/auth/shopify/callback",
+  "https://transit-pro.onrender.com/api/auth/callback"
+]
 
 [build]
-automatically_update_urls_on_dev = true
+automatically_update_urls_on_dev = false
