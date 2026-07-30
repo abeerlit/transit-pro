@@ -45,7 +45,7 @@ function App() {
 
   // NOTE: Update "transit-pro" below to match your actual Shopify app handle
   // found in your Shopify Partner Dashboard under App setup.
-  const appUrl = `https://admin.shopify.com/store/${shopHandle}/apps/transit-pro-1/app/orders/${orderId}`;
+  const appUrl = `https://admin.shopify.com/store/${shopHandle}/apps/transit-pro/app/orders/${orderId}`;
 
   return (
     <AdminAction>
