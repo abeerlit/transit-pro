@@ -1,0 +1,9 @@
+[[extensions]]
+name = "t:name"
+handle = "ship-with-dastaq"
+uid = "26c587f6-b913-b168-fc2c-8ea39738e3b9a8337603"
+type = "admin_link"
+
+[[extensions.targeting]]
+target = "admin.order-details.action.link"
+url = "app://app/orders"

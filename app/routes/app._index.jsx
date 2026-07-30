@@ -1,336 +1,275 @@
-import { useEffect } from "react";
-import { useFetcher } from "react-router";
-import { useAppBridge } from "@shopify/app-bridge-react";
+import { useState, useCallback } from "react";
+import { useLoaderData, useRevalidator } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
+import { Page } from "@shopify/polaris";
+import AddOrder from "../components/AddOrder";
+import Dashboard from "../components/Dashboard";
+import Setup from "../components/Setup";
+import Support from "../components/Support";
+import { BASEURL } from "../utils/constants";
 
 export const loader = async ({ request }) => {
-  await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
 
-  return null;
-};
+  const url = new URL(request.url);
+  const after = url.searchParams.get("after") || null;
+  const before = url.searchParams.get("before") || null;
+  const pageSize = parseInt(url.searchParams.get("pageSize") || "10");
 
-export const action = async ({ request }) => {
-  const { admin } = await authenticate.admin(request);
-  const color = ["Red", "Orange", "Yellow", "Green"][
-    Math.floor(Math.random() * 4)
-  ];
-  const response = await admin.graphql(
+  const paginationArgs = before
+    ? `last: ${pageSize}, before: "${before}"`
+    : `first: ${pageSize}${after ? `, after: "${after}"` : ""}`;
+
+  const shopResponse = await admin.graphql(`#graphql
+    query { shop { id } }
+  `);
+  const shopJson = await shopResponse.json();
+  const shop = shopJson.data?.shop;
+
+  const ordersResponse = await admin.graphql(
     `#graphql
-      mutation populateProduct($product: ProductCreateInput!) {
-        productCreate(product: $product) {
-          product {
+    query GetOrders($query: String) {
+      orders(${paginationArgs}, query: $query, sortKey: CREATED_AT, reverse: true) {
+        pageInfo {
+          hasNextPage
+          hasPreviousPage
+          startCursor
+          endCursor
+        }
+        edges {
+          cursor
+          node {
             id
-            title
-            handle
-            status
-            variants(first: 10) {
-              edges {
-                node {
-                  id
-                  price
-                  barcode
-                  createdAt
+            name
+            cancelledAt
+            totalWeight
+            displayFinancialStatus
+            customer {
+              displayName
+              phone
+              email
+            }
+            shippingAddress {
+              name
+              address1
+              address2
+              city
+              province
+              zip
+              country
+              phone
+            }
+            currentTotalPriceSet {
+              shopMoney { amount }
+            }
+            fulfillmentOrders(first: 10) {
+              nodes {
+                id
+                status
+                createdAt
+                updatedAt
+                lineItems(first: 20) {
+                  edges {
+                    node {
+                      id
+                      remainingQuantity
+                      totalQuantity
+                      lineItem {
+                        id
+                        title
+                        variant { id sku title }
+                      }
+                    }
+                  }
                 }
               }
             }
-            demoInfo: metafield(namespace: "$app", key: "demo_info") {
-              jsonValue
+            deliveryStatus: metafield(namespace: "custom", key: "delivery_status") {
+              value
             }
           }
         }
-      }`,
-    {
-      variables: {
-        product: {
-          title: `${color} Snowboard`,
-          metafields: [
-            {
-              namespace: "$app",
-              key: "demo_info",
-              value: "Created by React Router Template",
-            },
-          ],
-        },
-      },
-    },
-  );
-  const responseJson = await response.json();
-  const product = responseJson.data.productCreate.product;
-  const variantId = product.variants.edges[0].node.id;
-  const variantResponse = await admin.graphql(
-    `#graphql
-    mutation shopifyReactRouterTemplateUpdateVariant($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
-      productVariantsBulkUpdate(productId: $productId, variants: $variants) {
-        productVariants {
-          id
-          price
-          barcode
-          createdAt
-        }
       }
     }`,
     {
       variables: {
-        productId: product.id,
-        variants: [{ id: variantId, price: "100.00" }],
+        query: "fulfillment_status:unfulfilled status:open NOT tag:dastaq",
       },
-    },
+    }
   );
-  const variantResponseJson = await variantResponse.json();
-  const metaobjectResponse = await admin.graphql(
-    `#graphql
-    mutation shopifyReactRouterTemplateUpsertMetaobject($handle: MetaobjectHandleInput!, $values: JSON!) {
-      metaobjectUpsert(handle: $handle, values: $values) {
-        metaobject {
-          id
-          handle
-          values
-        }
-        userErrors {
-          field
-          message
-        }
-      }
-    }`,
-    {
-      variables: {
-        handle: {
-          type: "$app:example",
-          handle: "demo-entry",
-        },
-        values: {
-          title: "Demo Entry",
-          description:
-            "This metaobject was created by the Shopify app template to demonstrate the metaobject API.",
-        },
-      },
-    },
-  );
-  const metaobjectResponseJson = await metaobjectResponse.json();
 
-  return {
-    product: responseJson.data.productCreate.product,
-    variant: variantResponseJson.data.productVariantsBulkUpdate.productVariants,
-    metaobject: metaobjectResponseJson.data.metaobjectUpsert.metaobject,
-  };
+  const ordersData = await ordersResponse.json();
+  const ordersEdges = ordersData.data?.orders?.edges || [];
+  const pageInfo = ordersData.data?.orders?.pageInfo || {};
+
+  // Match dastaq filtering: exclude CLOSED/CANCELLED FOs, require remainingQuantity > 0
+  const filteredEdges = ordersEdges.filter((edge) => {
+    const activeFOs = (edge.node.fulfillmentOrders?.nodes || []).filter(
+      (fo) => fo?.status !== "CLOSED" && fo?.status !== "CANCELLED"
+    );
+    if (activeFOs.length === 0) return false;
+    for (const fo of activeFOs) {
+      for (const itemEdge of fo.lineItems?.edges || []) {
+        if ((itemEdge?.node?.remainingQuantity ?? 0) > 0) return true;
+      }
+    }
+    return false;
+  });
+
+  const orderNames = filteredEdges.map((e) => e.node.name);
+
+  // Fetch existing Dastaq order data to pre-populate consignee address
+  let existingOrdersMap = {};
+  try {
+    const bulkRes = await fetch(`${BASEURL}/api/orders/shopify/bulk`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ orderNames }),
+    });
+    if (bulkRes.ok) {
+      const bulkData = await bulkRes.json();
+      for (const o of bulkData?.data || []) {
+        existingOrdersMap[o.orderName || o.name] = o;
+      }
+    }
+  } catch (_) {}
+
+  const orders = filteredEdges.map((edge, idx) => {
+    const o = edge.node;
+    const addr = o.shippingAddress;
+    const existing = existingOrdersMap[o.name];
+
+    // Build line items from the latest active fulfillment order (same as dastaq)
+    const activeFOs = (o.fulfillmentOrders?.nodes || []).filter(
+      (fo) => fo?.status !== "CLOSED" && fo?.status !== "CANCELLED"
+    );
+    const latestFO = activeFOs.sort(
+      (a, b) =>
+        new Date(b?.updatedAt || b?.createdAt || 0).getTime() -
+        new Date(a?.updatedAt || a?.createdAt || 0).getTime()
+    )[0];
+
+    const currentItemsMap = new Map();
+    for (const itemEdge of latestFO?.lineItems?.edges || []) {
+      const base = itemEdge?.node?.lineItem || {};
+      const id = base.id || String(Math.random());
+      const sku = base?.variant?.sku;
+      const variantTitle = base?.variant?.title;
+      const title =
+        sku && variantTitle
+          ? `${base.title} (${sku} - ${variantTitle})`
+          : variantTitle
+          ? `${base.title} - ${variantTitle}`
+          : base.title;
+      const qty =
+        itemEdge?.node?.remainingQuantity ??
+        itemEdge?.node?.totalQuantity ??
+        0;
+      if (!currentItemsMap.has(id)) {
+        currentItemsMap.set(id, { id, title, sku, variantTitle, quantity: qty });
+      } else {
+        currentItemsMap.get(id).quantity += qty;
+      }
+    }
+    const lineItems = Array.from(currentItemsMap.values()).filter(
+      (item) => (item.quantity || 0) > 0
+    );
+
+    const productName = lineItems.length
+      ? lineItems.map((li) => `${li.title} x ${li.quantity}`).join(", ") + "."
+      : "";
+    const pieces = lineItems.reduce((sum, li) => sum + (li.quantity || 0), 0);
+
+    const isPaid = o.displayFinancialStatus === "PAID";
+    const rawAmount = o.currentTotalPriceSet?.shopMoney?.amount;
+    const cod = isPaid ? "0" : rawAmount ? parseFloat(rawAmount).toString() : "";
+    const type = isPaid ? "non-cod" : "cod";
+
+    const consigneeAddress =
+      existing?.consigneeAddress ||
+      [addr?.address1, addr?.address2].filter(Boolean).join(", ");
+
+    return {
+      id: idx + 1,
+      orderId: o.id,
+      order: o.name,
+      name: addr?.name || "",
+      phone: addr?.phone || "",
+      phone2: o.customer?.phone || "",
+      email: o.customer?.email || "",
+      address: consigneeAddress,
+      consigneeAddress,
+      city: addr?.city || "",
+      province: addr?.province || "",
+      zip: addr?.zip || "",
+      country: addr?.country || "",
+      lineItems,
+      cod,
+      weight: o.totalWeight || "700",
+      type,
+      selected: true,
+      mode: "",
+      fulfillmentOrders: o.fulfillmentOrders?.nodes || [],
+      productName,
+      pieces,
+      remarks: "",
+      deliveryStatus: o.deliveryStatus?.value || "",
+    };
+  });
+
+  return { orders, shopData: shop, pageInfo, _timestamp: Date.now() };
 };
 
-export default function Index() {
-  const fetcher = useFetcher();
-  const shopify = useAppBridge();
-  const isLoading =
-    ["loading", "submitting"].includes(fetcher.state) &&
-    fetcher.formMethod === "POST";
+export const shouldRevalidate = () => true;
 
-  useEffect(() => {
-    if (fetcher.data?.product?.id) {
-      shopify.toast.show("Product created");
-    }
-  }, [fetcher.data?.product?.id, shopify]);
-  const generateProduct = () => fetcher.submit({}, { method: "POST" });
+const TABS = ["Dashboard", "Add Booking", "Setup", "Support"];
+
+export default function Index() {
+  const { orders, shopData } = useLoaderData();
+  const [activeTab, setActiveTab] = useState(0);
+  const revalidator = useRevalidator();
+
+  const handleTabChange = useCallback(
+    (tab) => {
+      setActiveTab(tab);
+      if (tab === 1) {
+        setTimeout(() => revalidator.revalidate(), 50);
+      }
+    },
+    [revalidator]
+  );
 
   return (
-    <s-page heading="Shopify app template">
-      <s-button slot="primary-action" onClick={generateProduct}>
-        Generate a product
-      </s-button>
+    <Page>
+      <div style={{ marginBottom: 16, display: "flex", gap: 4 }}>
+        {TABS.map((tab, i) => (
+          <button
+            key={tab}
+            onClick={() => handleTabChange(i)}
+            style={{
+              padding: "8px 18px",
+              border: "1px solid #ccc",
+              borderRadius: 4,
+              background: activeTab === i ? "#008060" : "#fff",
+              color: activeTab === i ? "#fff" : "#333",
+              cursor: "pointer",
+              fontWeight: activeTab === i ? 600 : 400,
+              fontSize: 14,
+            }}
+          >
+            {tab}
+          </button>
+        ))}
+      </div>
 
-      <s-section heading="Congrats on creating a new Shopify app 🎉">
-        <s-paragraph>
-          This embedded app template uses{" "}
-          <s-link
-            href="https://shopify.dev/docs/apps/tools/app-bridge"
-            target="_blank"
-          >
-            App Bridge
-          </s-link>{" "}
-          interface examples like an{" "}
-          <s-link href="/app/additional">additional page in the app nav</s-link>
-          , as well as an{" "}
-          <s-link
-            href="https://shopify.dev/docs/api/admin-graphql"
-            target="_blank"
-          >
-            Admin GraphQL
-          </s-link>{" "}
-          mutation demo, to provide a starting point for app development.
-        </s-paragraph>
-      </s-section>
-      <s-section heading="Get started with products">
-        <s-paragraph>
-          Generate a product with GraphQL and get the JSON output for that
-          product. Learn more about the{" "}
-          <s-link
-            href="https://shopify.dev/docs/api/admin-graphql/latest/mutations/productCreate"
-            target="_blank"
-          >
-            productCreate
-          </s-link>{" "}
-          mutation in our API references. Includes a product{" "}
-          <s-link
-            href="https://shopify.dev/docs/apps/build/custom-data/metafields"
-            target="_blank"
-          >
-            metafield
-          </s-link>{" "}
-          and{" "}
-          <s-link
-            href="https://shopify.dev/docs/apps/build/custom-data/metaobjects"
-            target="_blank"
-          >
-            metaobject
-          </s-link>
-          .
-        </s-paragraph>
-        <s-stack direction="inline" gap="base">
-          <s-button
-            onClick={generateProduct}
-            {...(isLoading ? { loading: true } : {})}
-          >
-            Generate a product
-          </s-button>
-          {fetcher.data?.product && (
-            <s-button
-              onClick={() => {
-                shopify.intents.invoke?.("edit:shopify/Product", {
-                  value: fetcher.data?.product?.id,
-                });
-              }}
-              target="_blank"
-              variant="tertiary"
-            >
-              Edit product
-            </s-button>
-          )}
-        </s-stack>
-        {fetcher.data?.product && (
-          <s-section heading="productCreate mutation">
-            <s-stack direction="block" gap="base">
-              <s-box
-                padding="base"
-                borderWidth="base"
-                borderRadius="base"
-                background="subdued"
-              >
-                <pre
-                  style={{
-                    margin: 0,
-                    whiteSpace: "pre-wrap",
-                    wordBreak: "break-word",
-                  }}
-                >
-                  <code>{JSON.stringify(fetcher.data.product, null, 2)}</code>
-                </pre>
-              </s-box>
-
-              <s-heading>productVariantsBulkUpdate mutation</s-heading>
-              <s-box
-                padding="base"
-                borderWidth="base"
-                borderRadius="base"
-                background="subdued"
-              >
-                <pre
-                  style={{
-                    margin: 0,
-                    whiteSpace: "pre-wrap",
-                    wordBreak: "break-word",
-                  }}
-                >
-                  <code>{JSON.stringify(fetcher.data.variant, null, 2)}</code>
-                </pre>
-              </s-box>
-
-              <s-heading>metaobjectUpsert mutation</s-heading>
-              <s-box
-                padding="base"
-                borderWidth="base"
-                borderRadius="base"
-                background="subdued"
-              >
-                <pre
-                  style={{
-                    margin: 0,
-                    whiteSpace: "pre-wrap",
-                    wordBreak: "break-word",
-                  }}
-                >
-                  <code>
-                    {JSON.stringify(fetcher.data.metaobject, null, 2)}
-                  </code>
-                </pre>
-              </s-box>
-            </s-stack>
-          </s-section>
-        )}
-      </s-section>
-
-      <s-section slot="aside" heading="App template specs">
-        <s-paragraph>
-          <s-text>Framework: </s-text>
-          <s-link href="https://reactrouter.com/" target="_blank">
-            React Router
-          </s-link>
-        </s-paragraph>
-        <s-paragraph>
-          <s-text>Interface: </s-text>
-          <s-link
-            href="https://shopify.dev/docs/api/app-home/using-polaris-components"
-            target="_blank"
-          >
-            Polaris web components
-          </s-link>
-        </s-paragraph>
-        <s-paragraph>
-          <s-text>API: </s-text>
-          <s-link
-            href="https://shopify.dev/docs/api/admin-graphql"
-            target="_blank"
-          >
-            GraphQL
-          </s-link>
-        </s-paragraph>
-        <s-paragraph>
-          <s-text>Custom data: </s-text>
-          <s-link
-            href="https://shopify.dev/docs/apps/build/custom-data"
-            target="_blank"
-          >
-            Metafields &amp; metaobjects
-          </s-link>
-        </s-paragraph>
-        <s-paragraph>
-          <s-text>Database: </s-text>
-          <s-link href="https://www.prisma.io/" target="_blank">
-            Prisma
-          </s-link>
-        </s-paragraph>
-      </s-section>
-
-      <s-section slot="aside" heading="Next steps">
-        <s-unordered-list>
-          <s-list-item>
-            Build an{" "}
-            <s-link
-              href="https://shopify.dev/docs/apps/getting-started/build-app-example"
-              target="_blank"
-            >
-              example app
-            </s-link>
-          </s-list-item>
-          <s-list-item>
-            Explore Shopify&apos;s API with{" "}
-            <s-link
-              href="https://shopify.dev/docs/apps/tools/graphiql-admin-api"
-              target="_blank"
-            >
-              GraphiQL
-            </s-link>
-          </s-list-item>
-        </s-unordered-list>
-      </s-section>
-    </s-page>
+      {activeTab === 0 && <Dashboard />}
+      {activeTab === 1 && (
+        <AddOrder initialOrders={orders} shopId={shopData?.id || ""} />
+      )}
+      {activeTab === 2 && <Setup shopId={shopData?.id || ""} />}
+      {activeTab === 3 && <Support />}
+    </Page>
   );
 }
 

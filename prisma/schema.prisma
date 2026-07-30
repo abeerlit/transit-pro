@@ -12,6 +12,7 @@ datasource db {
   provider = "sqlite"
   url      = "file:dev.sqlite"
 }
+// For production on Render, set DATABASE_URL to your PostgreSQL URL and change provider to "postgresql"
 
 model Session {
   id            String    @id

@@ -1,0 +1,9 @@
+[[extensions]]
+name = "t:name"
+handle = "orders-tab-action"
+uid = "d27541fb-7739-e0db-24b0-6eef8cff1e2a451b7902"
+type = "admin_link"
+
+[[extensions.targeting]]
+target = "admin.order-index.selection-action.link"
+url = "app://app/orders"
