@@ -1,4 +1,4 @@
-FROM node:20-alpine
+FROM node:22-alpine
 RUN apk add --no-cache openssl
 
 EXPOSE 3000
@@ -18,7 +18,7 @@ COPY . .
 RUN npm run build
 
 # Strip dev deps after build to keep the image small
-RUN npm prune --production && npm cache clean --force
+RUN npm prune --omit=dev && npm cache clean --force
 RUN npm remove @shopify/cli || true
 
 CMD ["npm", "run", "docker-start"]
